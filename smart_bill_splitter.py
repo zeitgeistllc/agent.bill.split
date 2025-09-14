@@ -50,7 +50,7 @@ def simulate_tax_ocr_and_llm(tax_bill_file):
 # --- Sidebar for Grand Total ---
 st.sidebar.title("Summary")
 if st.session_state.processed_bills:
-    st.sidebar.header("Grand Total Summary")
+    st.sidebar.header("Processed Bills (Detail)")
     
     indices_to_remove = []
     for i, bill in enumerate(st.session_state.processed_bills):
@@ -58,7 +58,6 @@ if st.session_state.processed_bills:
         with col1:
             st.text(f"{bill['Bill Type']}: Apt 1: {bill['Apartment 1 (₪)']:.2f}, Apt 2: {bill['Apartment 2 (₪)']:.2f}")
         with col2:
-            # <<< FIXED LABEL WARNING by adding a label and hiding it >>>
             if st.checkbox("del", key=f"del_{i}", help="Mark to remove", label_visibility="collapsed"):
                 indices_to_remove.append(i)
     
@@ -67,10 +66,22 @@ if st.session_state.processed_bills:
             st.session_state.processed_bills = [bill for i, bill in enumerate(st.session_state.processed_bills) if i not in indices_to_remove]
             st.rerun()
 
-    summary_df = pd.DataFrame(st.session_state.processed_bills).set_index("Bill Type")
-    grand_total = summary_df.sum(); grand_total.name = "**GRAND TOTAL**"
-    summary_df = pd.concat([summary_df, pd.DataFrame(grand_total).T])
-    st.sidebar.dataframe(summary_df.style.format("{:.2f}"))
+    st.sidebar.divider()
+    
+    st.sidebar.header("Totals by Category")
+    summary_df = pd.DataFrame(st.session_state.processed_bills)
+    summary_df['Category'] = summary_df['Bill Type'].apply(lambda x: x.split(' ')[0])
+    
+    subtotals_df = summary_df.groupby('Category')[['Apartment 1 (₪)', 'Apartment 2 (₪)']].sum()
+    
+    # <<< NEW: Add the total column for each category >>>
+    subtotals_df['Category Total (₪)'] = subtotals_df['Apartment 1 (₪)'] + subtotals_df['Apartment 2 (₪)']
+    
+    if not subtotals_df.empty:
+        grand_total = subtotals_df.sum()
+        subtotals_df.loc['**GRAND TOTAL**'] = grand_total
+    
+    st.sidebar.dataframe(subtotals_df.style.format("{:.2f}"))
     
     if st.sidebar.button("Clear All Totals"):
         st.session_state.processed_bills = []; st.rerun()
@@ -156,9 +167,7 @@ with st.container(border=True):
         if not st.session_state.elec_result_saved:
             st.session_state.processed_bills.append(result); st.session_state.last_elec_result = result
             st.session_state.elec_result_saved = True; st.rerun()
-        col1, col2 = st.columns(2)
-        # <<< ADDED UNIQUE KEYS to prevent crash >>>
-        col1.button("Process Another Electricity Bill", on_click=reset_workflow, args=('elec',), use_container_width=True, key="reset_elec")
+        col1, col2 = st.columns(2); col1.button("Process Another Electricity Bill", on_click=reset_workflow, args=('elec',), use_container_width=True, key="reset_elec")
         if st.session_state.last_elec_result: col2.button("Add This Bill Again to Summary", on_click=lambda: (st.session_state.processed_bills.append(st.session_state.last_elec_result), st.rerun()), use_container_width=True, key="readd_elec")
 
 st.divider()
@@ -212,7 +221,5 @@ with st.container(border=True):
         if not st.session_state.water_result_saved:
             st.session_state.processed_bills.append(result); st.session_state.last_water_result = result
             st.session_state.water_result_saved = True; st.rerun()
-        col1, col2 = st.columns(2)
-        # <<< ADDED UNIQUE KEYS to prevent crash >>>
-        col1.button("Process Another Water Bill", on_click=reset_workflow, args=('water',), use_container_width=True, key="reset_water")
+        col1, col2 = st.columns(2); col1.button("Process Another Water Bill", on_click=reset_workflow, args=('water',), use_container_width=True, key="reset_water")
         if st.session_state.last_water_result: col2.button("Add This Bill Again to Summary", on_click=lambda: (st.session_state.processed_bills.append(st.session_state.last_water_result), st.rerun()), use_container_width=True, key="readd_water")
