@@ -1,0 +1,49 @@
+Universal Bill Splitter (Qwen VL Edition)
+This Streamlit application uses the Qwen Vision-Language model via the Replicate API to extract data from bill images and calculate splits between two apartments.
+
+Setup Instructions
+This version does not use Google Cloud. It uses the Replicate API.
+
+1. Install Dependencies
+First, ensure you have Python 3.9+ installed.
+
+You also need to install Poppler, which is a system dependency required by the pdf2image library to handle PDF files.
+
+On macOS (using Homebrew):
+
+brew install poppler
+
+On Debian/Ubuntu:
+
+sudo apt-get update && sudo apt-get install -y poppler-utils
+
+On Windows: This is more complex. You need to download the Poppler binaries, extract them, and add the bin folder to your system's PATH. Follow a detailed guide for this.
+
+After installing Poppler, install the required Python libraries:
+
+pip install -r requirements.txt
+
+2. Get a Replicate API Token
+Go to Replicate.com and sign up for an account (you can use your GitHub account).
+
+Navigate to your Account Settings.
+
+Under the API Tokens tab, you will find your API token. Copy this token.
+
+3. Configure Streamlit Secrets
+In your project directory, create a folder named .streamlit.
+
+Inside that folder, create a file named secrets.toml.
+
+Add your Replicate API token to this file like so:
+
+# .streamlit/secrets.toml
+
+REPLICATE_API_TOKEN = "r8_AbCdEfGhIjKlMnOpQrStUvWxYz..."
+
+Replace r8_... with your actual token from the Replicate website.
+
+4. Run the Application
+Once the secrets are configured, run the app from your terminal:
+
+streamlit run universal_bill_splitter.py

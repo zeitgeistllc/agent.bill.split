@@ -1,0 +1,23 @@
+{
+  "arnona": {
+    "type": "fixed",
+    "split": {
+      "apartment1": 0.5,
+      "apartment2": 0.5
+    }
+  },
+  "water": {
+    "fixed_split": {
+      "apartment1": 0.5,
+      "apartment2": 0.5
+    },
+    "usage_split": "meter"
+  },
+  "electricity": {
+    "fixed_split": {
+      "apartment1": 0.5,
+      "apartment2": 0.5
+    },
+    "usage_split": "meter"
+  }
+}

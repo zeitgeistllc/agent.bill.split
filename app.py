@@ -1,271 +1,233 @@
 import os
 import streamlit as st
-import fitz  # PyMuPDF
 import tempfile
 from dotenv import load_dotenv
-from langchain.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain_core.prompts import PromptTemplate
+import json
+import re
+from PIL import Image
+import base64
+import fitz # PyMuPDF
+
+from langchain_ollama import ChatOllama
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAI
+from google.api_core.exceptions import ResourceExhausted
+from langchain_core.messages import HumanMessage
 
 # ==============================================================================
-# 1. AGENT PROMPT TEMPLATE
-# This is the agent's "brain." It's based on your specific instructions.
-# ==============================================================================
-AGENT_TEMPLATE = """
-# תפקיד ומטרה
-אתה מוגדר כעוזר אישי אוטומטי לניהול וחלוקת חשבונות ביתיים. תפקידך המרכזי הוא לחלץ נתונים מחשבונות (PDF) ומתמונות מונים (JPG), ולאחר מכן לחלק את העלויות בין שתי דירות על בסיס הנתונים שחולצו והכללים שיוגדרו.
-
-# כללים וזרימת עבודה
-
-1.  **הבנת המשימה:** קודם כל, הבן מה המשתמש רוצה לעשות. האם הוא רוצה לחלק חשבון? לחלץ נתונים מקובץ? עליך להבין את המטרה לפני שאתה פועל.
-
-2.  **איסוף נתונים:**
-    * **אם המשתמש העלה קבצים:** השתמש בכלי `pdf_reader_tool` עבור קבצי PDF ובכלי `meter_reader_tool` עבור תמונות. חלץ את כל הנתונים הרלוונטיים.
-    * **אם חסר מידע:** לאחר ניתוח הקבצים או קריאת הבקשה, אם חסר לך מידע קריטי לחישוב (למשל, קריאת מונה קודמת, סכום קבוע בחשבון), **עצור ושאל את המשתמש ישירות**. אל תנסה לנחש.
-        * דוגמה לשאלה: "ניתחתי את חשבון החשמל ולא מצאתי את סך הצריכה בקוט"ש. אנא הקלד את הנתון הזה."
-        * דוגמה נוספת: "זיהיתי את קריאת המונה הנוכחית מהתמונה כ-9831.1. מה הייתה קריאת המונה הקודמת של דירה 1?"
-    * **זיכרון:** השתמש ב-`get_previous_reading_tool` כדי לבדוק אם קריאת מונה קודמת כבר קיימת בזיכרון. לאחר חישוב, השתמש ב-`save_current_reading_tool` כדי לשמור את הקריאה הנוכחית לעתיד.
-
-3.  **ביצוע חישובים:**
-    * **ארנונה:** השתמש ב-`arnona_calculator_tool` לחלוקה של 50/50.
-    * **מים וחשמל:** השתמש ב-`bill_calculator_tool`. עליך לספק לו את כל הפרמטרים הנדרשים: `total_bill`, `fixed_charges`, `total_consumption`, ו-`apt1_consumption`.
-
-4.  **הצגת התוצאות:**
-    * הצג את הפלט הסופי בצורה ברורה ומסודרת, כפי שהכלי מחזיר אותו.
-    * ודא שהפלט כולל טבלת סיכום ברורה לכל חשבון, עם פירוט החיובים עבור 'דירה 1' ו'דירה 2', כולל חלוקה לעלויות קבועות ועלויות צריכה.
-    * אם חילקת מספר חשבונות, הצג סיכום **"סה"כ לתשלום כולל"** המראה את הסכום הסופי שכל דירה חייבת לשלם.
-
-**TOOLS:**
-------
-You have access to the following tools. You must use the tool names from this list: {tool_names}
-Here are the detailed descriptions of the tools:
-{tools}
-
-**RESPONSE FORMAT:**
-------
-Use the following format for your response.
-
-Thought: Your reasoning process in Hebrew.
-Action: The name of the tool to use, from the list above.
-Action Input: The input for the tool.
-Observation: The result from the tool.
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now have enough information to provide the final answer to the user.
-Final Answer: Your final, comprehensive response to the user, formatted in Hebrew according to the output rules.
-
-Begin!
-
-User's Request: {input}
-Thought Log: {agent_scratchpad}
-"""
-
-
-# ==============================================================================
-# 2. TOOLS DEFINITION
-# All tools are defined here as simple functions with the @tool decorator.
+# 1. CORE LOGIC - We now have TWO distinct analysis pipelines.
 # ==============================================================================
 
-@tool
-def bill_calculator_tool(total_bill: float, fixed_charges: float, total_consumption: float, apt1_consumption: float) -> str:
+def get_llm(provider, ollama_model, gemini_model, api_key):
+    """Initializes and returns the selected conversational language model."""
+    if provider == "Ollama (Local)":
+        try:
+            return ChatOllama(model=ollama_model, temperature=0)
+        except Exception as e:
+            st.error(f"Ollama initialization failed: {e}")
+            st.stop()
+    elif provider == "Gemini (Google)":
+        if not api_key:
+            st.warning("נדרש מפתח API של Google Gemini.")
+            st.stop()
+        try:
+            return ChatGoogleGenerativeAI(model=gemini_model, google_api_key=api_key, temperature=0)
+        except Exception as e:
+            st.error(f"Gemini initialization failed: {e}")
+            st.stop()
+
+def analyze_document_with_gemini(file_path: str, llm: ChatGoogleGenerativeAI) -> dict:
+    """Uses Gemini 1.5 Pro's multimodal capabilities for analysis."""
+    st.write(f"🕵️‍♂️ מנתח את הקובץ עם Gemini Vision: `{os.path.basename(file_path)}`...")
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    mime_type = "application/pdf" if file_path.endswith(".pdf") else f"image/{os.path.splitext(file_path)[1].lstrip('.')}"
+    prompt = """
+    Analyze the provided file (image or PDF) and return a structured JSON object.
+    First, determine the document_type: "arnona_bill", "utility_bill", "meter_reading", or "unknown".
+    Then, extract the relevant numerical values for that type: 'total_amount', 'total_consumption', 'fixed_charges', 'meter_reading'.
+    Use 0 for missing values. Respond with ONLY a single, valid JSON object.
     """
-    Calculates the bill split for water or electricity between two apartments.
-    Takes the total bill amount, any fixed charges, the total consumption (e.g., in kWh or m³),
-    and the consumption of Apartment 1.
-    It splits fixed charges 50/50 and the rest based on consumption.
-    Returns a formatted string detailing the split for each apartment.
-    """
-    try:
-        # Input validation
-        if total_bill < 0 or fixed_charges < 0 or total_consumption < 0 or apt1_consumption < 0:
-            return "Error: All numerical inputs must be non-negative."
-        if fixed_charges > total_bill:
-            return "Error: Fixed charges cannot be greater than the total bill."
-        if apt1_consumption > total_consumption:
-            return "Error: Apartment 1 consumption cannot be greater than total consumption."
+    message = HumanMessage(content=[{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64.b64encode(file_bytes).decode()}"}}])
+    response = llm.invoke([message])
+    json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+    if not json_match: raise ValueError(f"Gemini did not return valid JSON. Raw response: {response.content}")
+    try: return json.loads(json_match.group(0))
+    except json.JSONDecodeError: raise ValueError(f"Gemini returned malformed JSON: {json_match.group(0)}")
 
-        # Calculations
+def analyze_document_locally_with_ollama(file_path: str, structure_llm: ChatOllama) -> dict:
+    """
+    A completely local pipeline. Uses Llava for OCR and another Ollama model for structuring.
+    """
+    st.write(f"🕵️‍♂️ מנתח את הקובץ מקומית עם Ollama: `{os.path.basename(file_path)}`...")
+    extracted_text = ""
+    # --- Step 1: Use Llava for OCR on the image or PDF pages ---
+    vision_model = ChatOllama(model="llava", temperature=0)
+    if file_path.endswith('.pdf'):
+        doc = fitz.open(file_path)
+        for i, page in enumerate(doc):
+            st.write(f"  - מעבד עמוד {i+1} עם llava...")
+            pix = page.get_pixmap(dpi=200)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            with tempfile.NamedTemporaryFile(suffix=".jpeg", delete=False) as tmp:
+                img.convert("RGB").save(tmp, format="jpeg")
+                tmp_path = tmp.name
+            with open(tmp_path, "rb") as f:
+                base64_image = base64.b64encode(f.read()).decode('utf-8')
+            os.remove(tmp_path)
+            msg = HumanMessage(content=[{"type": "text", "text": "Extract all text from this image."}, {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}])
+            res = vision_model.invoke([msg])
+            extracted_text += res.content + "\n"
+        doc.close()
+    else: # It's an image
+        with open(file_path, "rb") as f:
+            base64_image = base64.b64encode(f.read()).decode('utf-8')
+        msg = HumanMessage(content=[{"type": "text", "text": "Extract all text from this image."}, {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}])
+        res = vision_model.invoke([msg])
+        extracted_text = res.content
+    
+    if not extracted_text.strip(): raise ValueError("Llava (vision model) failed to extract any text.")
+    
+    # --- Step 2: Use the main Ollama model (e.g., codellama) to structure the text ---
+    st.write("🧠 מבין את הטקסט שחולץ...")
+    prompt = f"""
+    Analyze the text below. Determine the document_type ("arnona_bill", "utility_bill", "meter_reading", or "unknown")
+    and extract the relevant values: 'total_amount', 'total_consumption', 'fixed_charges', 'meter_reading'.
+    Use 0 for missing values. Respond with ONLY a single, valid JSON object.
+    Text: --- {extracted_text} ---
+    """
+    response = structure_llm.invoke(prompt)
+    json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+    if not json_match: raise ValueError(f"The structuring model did not return valid JSON. Raw response: {response.content}")
+    try: return json.loads(json_match.group(0))
+    except json.JSONDecodeError: raise ValueError(f"The structuring model returned malformed JSON: {json_match.group(0)}")
+
+def execute_calculation(data: dict, apt1_consumption: float = None) -> str:
+    """Calls the correct Python function based on the structured data."""
+    doc_type = data.get("document_type")
+    
+    if doc_type == "arnona_bill":
+        total = data.get("total_amount", 0.0)
+        if total == 0: return "שגיאה: לא נמצא סכום כולל בחשבון הארנונה."
+        split = total / 2
+        return f"--- חלוקת ארנונה ---\nסך הכל: {total:.2f}\nדירה 1: {split:.2f}\nדירה 2: {split:.2f}"
+        
+    elif doc_type == "utility_bill":
+        total_bill = data.get("total_amount", 0.0)
+        if total_bill == 0: return "שגיאה: חסר סכום כולל בחשבון."
+        
+        if apt1_consumption is None:
+            st.session_state.needs_apt1_consumption = True
+            st.session_state.utility_data = data
+            return "נמצאו נתוני החשבון. אנא ספק את הצריכה של דירה 1."
+
+        fixed_charges = data.get("fixed_charges", 0.0)
+        total_consumption = data.get("total_consumption", 0.0)
         consumption_cost = total_bill - fixed_charges
         cost_per_unit = consumption_cost / total_consumption if total_consumption > 0 else 0
-
         apt1_fixed = fixed_charges / 2
         apt1_consumption_cost = apt1_consumption * cost_per_unit
         apt1_total = apt1_fixed + apt1_consumption_cost
-
         apt2_consumption = total_consumption - apt1_consumption
         apt2_fixed = fixed_charges / 2
         apt2_consumption_cost = apt2_consumption * cost_per_unit
         apt2_total = apt2_fixed + apt2_consumption_cost
+        return f"--- סיכום חשבון ---\nדירה 1 ({apt1_consumption} יח'): {apt1_total:.2f}\nדירה 2 ({apt2_consumption} יח'): {apt2_total:.2f}"
 
-        # Verification
-        if not abs((apt1_total + apt2_total) - total_bill) < 0.01:
-             return f"Error: Calculation mismatch. Apt1({apt1_total}) + Apt2({apt2_total}) != Total({total_bill})."
-
-        # Formatting output
-        result = (
-            "--- סיכום חלוקת חשבון ---\n"
-            f"דירה 1:\n"
-            f"  - חלק בתשלומים קבועים: {apt1_fixed:.2f}\n"
-            f"  - עלות צריכה ({apt1_consumption} יחידות): {apt1_consumption_cost:.2f}\n"
-            f"  - סך הכל: {apt1_total:.2f}\n"
-            f"דירה 2:\n"
-            f"  - חלק בתשלומים קבועים: {apt2_fixed:.2f}\n"
-            f"  - עלות צריכה ({apt2_consumption} יחידות): {apt2_consumption_cost:.2f}\n"
-            f"  - סך הכל: {apt2_total:.2f}\n"
-            f"---------------------------\n"
-            f"אימות: סך החלוקה תואם לסכום החשבון."
-        )
-        return result
-
-    except ZeroDivisionError:
-        return "שגיאה: סך הצריכה הוא אפס, לא ניתן לחשב עלות ליחידה."
-    except Exception as e:
-        return f"שגיאה לא צפויה: {e}"
-
-@tool
-def arnona_calculator_tool(total_arnona: float) -> str:
-    """
-    Calculates a 50/50 split of the total Arnona (property tax) bill.
-    Takes the total Arnona amount and returns a string detailing the split.
-    """
-    if total_arnona < 0:
-        return "שגיאה: סכום הארנונה חייב להיות מספר חיובי."
-    split_amount = total_arnona / 2
-    return (
-        f"--- חלוקת ארנונה ---\n"
-        f"דירה 1 חייבת: {split_amount:.2f}\n"
-        f"דירה 2 חייבת: {split_amount:.2f}\n"
-        f"סך הכל: {total_arnona:.2f}"
-    )
-
-@tool
-def pdf_reader_tool(file_path: str) -> str:
-    """
-    Reads all text from a PDF file. The input must be a valid file path.
-    """
-    try:
-        doc = fitz.open(file_path)
-        text = "".join(page.get_text() for page in doc)
-        doc.close()
-        return f"טקסט שחולץ מ-{file_path}:\n\n{text}" if text.strip() else f"לא נמצא טקסט בקובץ {file_path}."
-    except Exception as e:
-        return f"שגיאה בקריאת קובץ PDF בנתיב '{file_path}': {e}"
-
-@tool
-def meter_reader_tool(file_path: str) -> str:
-    """
-    Placeholder to simulate reading a meter from an image. Returns a dummy value.
-    """
-    return f"התמונה בנתיב '{file_path}' עובדה בהצלחה. תוצאת זיהוי תווים דמה: 9831.1"
-
-# For memory, we will use a simple session_state variable instead of a file.
-@tool
-def get_previous_reading_tool(meter_type: str) -> str:
-    """
-    Gets the previous meter reading saved in memory.
-    Input must be 'electricity' or 'water'.
-    """
-    key = f"previous_{meter_type}_reading"
-    reading = st.session_state.get(key, "לא נמצא")
-    return f"קריאת המונה הקודמת עבור {meter_type} היא: {reading}"
-
-@tool
-def save_current_reading_tool(meter_type: str, reading: float) -> str:
-    """
-    Saves the current meter reading to memory for next time.
-    Input must be meter_type ('electricity' or 'water') and the new reading.
-    """
-    key = f"previous_{meter_type}_reading"
-    st.session_state[key] = reading
-    return f"קריאת המונה עבור {meter_type} נשמרה בהצלחה: {reading}."
-
+    elif doc_type == "meter_reading":
+        return f"קריאת המונה שזוהתה היא: {data.get('meter_reading', 'לא ידוע')}"
+    else:
+        return f"לא הצלחתי לזהות את סוג המסמך '{doc_type}'."
 
 # ==============================================================================
-# 3. AGENT CREATION
-# ==============================================================================
-
-@st.cache_resource
-def create_bill_splitter_agent():
-    """
-    Creates and configures the bill splitting agent executor.
-    """
-    load_dotenv()
-    if not os.getenv("GOOGLE_API_KEY"):
-        st.error("GOOGLE_API_KEY not found in .env file. Please create one.")
-        st.stop()
-    
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0)
-    
-    tools = [
-        bill_calculator_tool,
-        arnona_calculator_tool,
-        pdf_reader_tool,
-        meter_reader_tool,
-        get_previous_reading_tool,
-        save_current_reading_tool
-    ]
-    
-    # We now use our custom prompt template instead of the generic one from the hub
-    prompt = PromptTemplate.from_template(AGENT_TEMPLATE)
-    
-    agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
-    
-    return AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
-
-
-# ==============================================================================
-# 4. STREAMLIT UI
+# 2. STREAMLIT UI - Rewritten to select the correct analysis pipeline.
 # ==============================================================================
 
 st.set_page_config(page_title="מפצל החשבונות", layout="centered")
+st.markdown("<style>body, .stApp { direction: rtl; } h1, .st-caption, [data-testid='stFileUploader'] label, .st-emotion-cache-1gulkj5, [data-testid='stAlert'], [data-testid='stSidebar'] * { text-align: right; } [data-testid='stChatMessageContent'] * { text-align: right; } [data-testid='stChatInput'] textarea { direction: rtl, text-align: right; }</style>", unsafe_allow_html=True)
+
+st.sidebar.title("הגדרות מודל")
+model_provider = st.sidebar.radio("בחר ספק:", ("Ollama (Local)", "Gemini (Google)"), key="model_provider")
+
+google_api_key = None
+gemini_model_name = "gemini-1.5-pro-latest"
+ollama_model_name = "codellama"
+
+if model_provider == "Ollama (Local)":
+    st.sidebar.info("ניתוח קבצים יתבצע באופן מקומי באמצעות המודלים llava ו-codellama.")
+    ollama_model_name = st.sidebar.selectbox("בחר מודל לשיחה:", ("codellama", "llama3", "mistral"), key="ollama_model")
+else: # Gemini
+    st.sidebar.info("ניתוח קבצים יתבצע באמצעות Gemini 1.5 Pro. הבחירה למטה היא עבור שיחות כלליות.")
+    load_dotenv()
+    google_api_key = st.sidebar.text_input("מפתח API של Gemini:", type="password", value=os.getenv("GOOGLE_API_KEY", ""), key="gemini_key")
+    gemini_model_name = st.sidebar.selectbox("בחר מודל לשיחה:", ("gemini-1.5-pro-latest", "gemini-1.5-flash-latest"), key="gemini_model")
+
+llm = get_llm(model_provider, ollama_model_name, gemini_model_name, google_api_key)
+
 st.title("📄🤖 מפצל החשבונות")
-st.caption("אני כאן כדי לעזור בחלוקת חשבונות. העלו קבצים וכתבו לי מה לעשות.")
+st.caption("העלו קבצים וכתבו לי מה לעשות.")
 
-agent_executor = create_bill_splitter_agent()
+if "messages" not in st.session_state: st.session_state.messages = []
+if "uploaded_file_paths" not in st.session_state: st.session_state.uploaded_file_paths = []
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-uploaded_files = st.file_uploader(
-    "העלאת חשבונות (PDF) או קריאות מונה (JPG/PNG)",
-    type=['pdf', 'png', 'jpg', 'jpeg'],
-    accept_multiple_files=True
-)
-
-file_info_string = ""
+uploaded_files = st.file_uploader("העלאת קבצים:", accept_multiple_files=True, key="file_uploader")
 if uploaded_files:
     temp_dir = tempfile.mkdtemp()
-    file_paths = [os.path.join(temp_dir, f.name) for f in uploaded_files]
-    for uploaded_file, path in zip(uploaded_files, file_paths):
-        with open(path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-    
-    file_info_string = (
-        "המשתמש העלה את הקבצים הבאים. השתמש בנתיבים המלאים שלהם כדי לעבד אותם:\n"
-        + "\n".join(file_paths)
-    )
-    st.info(f"הועלו בהצלחה: `{'`, `'.join([f.name for f in uploaded_files])}`")
+    st.session_state.uploaded_file_paths = []
+    for f in uploaded_files:
+        path = os.path.join(temp_dir, f.name)
+        with open(path, "wb") as out_file: out_file.write(f.getvalue())
+        st.session_state.uploaded_file_paths.append(path)
+    st.info(f"הועלו {len(st.session_state.uploaded_file_paths)} קבצים.")
 
 if prompt := st.chat_input("מה נרצה לעשות?"):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    agent_input = f"{prompt}\n\n{file_info_string}"
+    with st.chat_message("user"): st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("...חושב"):
+        with st.spinner("...חושב ומעבד"):
             try:
-                response = agent_executor.invoke({"input": agent_input})
-                output = response.get("output", "נתקלתי בשגיאה.")
-                st.markdown(output)
-                st.session_state.messages.append({"role": "assistant", "content": output})
+                if st.session_state.uploaded_file_paths:
+                    all_results = []
+                    for file_path in st.session_state.uploaded_file_paths:
+                        if model_provider == "Gemini (Google)":
+                            if not google_api_key: st.error("נדרש מפתח API של Google Gemini."); st.stop()
+                            analysis_llm = get_llm("Gemini (Google)", "", "gemini-1.5-pro-latest", google_api_key)
+                            structured_data = analyze_document_with_gemini(file_path, analysis_llm)
+                        else: # Ollama
+                            structured_data = analyze_document_locally_with_ollama(file_path, llm)
+                        
+                        st.write(f"**תוצאות עבור `{os.path.basename(file_path)}`:**"); st.json(structured_data)
+                        result = execute_calculation(structured_data)
+                        all_results.append(result)
+                    
+                    final_output = "\n\n---\n\n".join(all_results)
+                    st.markdown(final_output)
+                    st.session_state.messages.append({"role": "assistant", "content": final_output})
+                    st.session_state.uploaded_file_paths = []
+
+                elif st.session_state.get("needs_apt1_consumption"):
+                    apt1_consumption_float = float(prompt)
+                    utility_data = st.session_state.utility_data
+                    final_split = execute_calculation(utility_data, apt1_consumption_float)
+                    st.markdown(final_split)
+                    st.session_state.messages.append({"role": "assistant", "content": final_split})
+                    st.session_state.needs_apt1_consumption = False
+                    del st.session_state.utility_data
+                
+                else:
+                    response = llm.invoke(prompt)
+                    st.markdown(response.content)
+                    st.session_state.messages.append({"role": "assistant", "content": response.content})
+
+            except (ValueError, ResourceExhausted) as e:
+                st.error(f"שגיאה: {e}")
             except Exception as e:
-                error_message = f"אירעה שגיאה: {e}"
-                st.error(error_message)
-                st.session_state.messages.append({"role": "assistant", "content": error_message})
+                st.error(f"אירעה שגיאה בלתי צפויה: {e}")
+
+if not uploaded_files and st.session_state.get("uploaded_file_paths"):
+    st.session_state.uploaded_file_paths = []
+    st.rerun()
 
